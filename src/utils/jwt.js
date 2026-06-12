@@ -1,22 +1,50 @@
-import jwt from "jsonwebtoken"; 
+import jwt from 'jsonwebtoken';
 
-export function generateToken(payload) {  
-  
-  const secret = process.env.JWT_SECRET;
-  if (!secret) {
-    throw new Error('JWT_SECRET is not defined in environment variables');
-  }
-  
-  if (!payload || typeof payload !== 'object') {
-    throw new Error('Payload must be an object');
-  }
-  if (!payload.id) {
-    throw new Error('Payload must contain user id');
-  }
-  
-  try {
-    return jwt.sign(payload, secret, { expiresIn: "1h" });
-  } catch (error) {
-    throw new Error(`Token generation failed: ${error.message}`);
-  }
-}
+export const generateToken = (user) => {
+    const secret = process.env.JWT_SECRET;
+    
+    if (!secret) {
+        throw new Error('JWT_SECRET is not defined');
+    }
+
+    const payload = {
+        id: user.id,
+        email: user.email,
+        role: user.role || 'user',
+        username: user.username,
+        roleLevel: getRoleLevel(user.role)
+    };
+
+    return jwt.sign(payload, secret, { expiresIn: '24h' });
+};
+
+const getRoleLevel = (role) => {
+    const levels = {
+        'user': 1,
+        'moderator': 2,
+        'super_admin': 3
+    };
+    return levels[role] || 1;
+};
+
+export const verifyToken = (token) => {
+    const secret = process.env.JWT_SECRET;
+    
+    if (!secret) {
+        throw new Error('JWT_SECRET is not defined');
+    }
+
+    try {
+        return jwt.verify(token, secret);
+    } catch (error) {
+        throw error;
+    }
+};
+
+export const decodeToken = (token) => {
+    try {
+        return jwt.decode(token);
+    } catch (error) {
+        return null;
+    }
+};

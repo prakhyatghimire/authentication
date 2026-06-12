@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-// ========== Base Schemas ==========
+
 const emailSchema = z.string()
   .trim()
   .toLowerCase()
@@ -22,7 +22,7 @@ const usernameSchema = z.string()
   .max(50, "Username cannot exceed 50 characters")
   .regex(/^[a-zA-Z0-9_.-]+$/, "Username can only contain letters, numbers, underscores, dots, and hyphens");
 
-// ========== Auth Schemas ==========
+
 export const registerSchema = z.object({
   username: usernameSchema,
   email: emailSchema,
@@ -38,7 +38,7 @@ export const loginSchema = z.object({
   password: z.string().min(1, "Password is required")
 });
 
-// ========== Password Management ==========
+
 export const forgotPasswordSchema = z.object({
   email: emailSchema
 });
@@ -52,7 +52,7 @@ export const resetPasswordSchema = z.object({
   path: ["confirmPassword"]
 });
 
-// ========== Profile Management ==========
+
 export const updateProfileSchema = z.object({
   username: usernameSchema.optional(),
   email: emailSchema.optional()
@@ -60,7 +60,6 @@ export const updateProfileSchema = z.object({
   message: "At least one field must be updated"
 });
 
-// ========== Additional Schemas (Optional) ==========
 export const changePasswordSchema = z.object({
   currentPassword: z.string().min(1, "Current password is required"),
   newPassword: passwordSchema,
@@ -75,11 +74,11 @@ export const changeEmailSchema = z.object({
   password: z.string().min(1, "Password is required to change email")
 });
 
-// ========== Validation Helper ==========
+
 export const validate = (schema, data) => {
   const result = schema.safeParse(data);
   if (!result.success) {
-    const errors = result.error.errors.map(err => ({
+    const errors = (result.error.issues || result.error.errors).map(err => ({
       field: err.path.join('.'),
       message: err.message
     }));
