@@ -1,4 +1,4 @@
-import { pool } from '../config/db.js';
+import { prisma } from '../config/db.js';
 import { hashPassword, comparePassword } from '../utils/hash.js';
 import { generateToken } from '../utils/jwt.js';
 import {
@@ -28,6 +28,16 @@ const buildUrl = (path, token) => {
     return `${baseUrl.replace(/\/$/, '')}${path}?token=${token}`;
 };
 
+const publicUserSelect = {
+    id: true,
+    username: true,
+    email: true,
+    role: true,
+    avatar_url: true,
+    is_email_verified: true,
+    created_at: true
+};
+
 const issueAuthResponse = (res, status, message, user) => {
     const token = generateToken(user);
 
@@ -43,12 +53,12 @@ export const registerUser = async (req, res) => {
         const validatedData = registerSchema.parse(req.body);
         const { username, email, password } = validatedData;
 
-        const existingUser = await pool.query(
-            'SELECT id FROM users WHERE email = $1',
-            [email]
-        );
+        const existingUser = await prisma.user.findUnique({
+            where: { email },
+            select: { id: true }
+        });
 
-        if (existingUser.rows.length > 0) {
+        if (existingUser) {
             return res.status(409).json({
                 message: 'User with this email already exists'
             });
@@ -58,19 +68,22 @@ export const registerUser = async (req, res) => {
         const verificationToken = createSecureToken();
         const verificationTokenHash = hashToken(verificationToken);
 
-        const newUser = await pool.query(
-            `INSERT INTO users (
-                username, email, password, role, is_email_verified,
-                email_verification_token, email_verification_expires
-             )
-             VALUES ($1, $2, $3, $4, false, $5, $6)
-             RETURNING id, username, email, role, avatar_url, is_email_verified, created_at`,
-            [username, email, passwordHash, 'user', verificationTokenHash, getExpiryDate(24 * 60)]
-        );
+        const newUser = await prisma.user.create({
+            data: {
+                username,
+                email,
+                password: passwordHash,
+                role: 'user',
+                is_email_verified: false,
+                email_verification_token: verificationTokenHash,
+                email_verification_expires: getExpiryDate(24 * 60)
+            },
+            select: publicUserSelect
+        });
 
         await sendVerificationEmail(email, buildUrl('/verify-email', verificationToken));
 
-        return issueAuthResponse(res, 201, 'User registered successfully', newUser.rows[0]);
+        return issueAuthResponse(res, 201, 'User registered successfully', newUser);
     } catch (error) {
         if (error instanceof z.ZodError) {
             return res.status(400).json({
@@ -97,12 +110,12 @@ export const registerSuperAdmin = async (req, res) => {
         const validatedData = registerSchema.parse(req.body);
         const { username, email, password } = validatedData;
 
-        const existingUser = await pool.query(
-            'SELECT id FROM users WHERE email = $1',
-            [email]
-        );
+        const existingUser = await prisma.user.findUnique({
+            where: { email },
+            select: { id: true }
+        });
 
-        if (existingUser.rows.length > 0) {
+        if (existingUser) {
             return res.status(409).json({
                 message: 'User with this email already exists'
             });
@@ -110,22 +123,27 @@ export const registerSuperAdmin = async (req, res) => {
 
         const passwordHash = await hashPassword(password);
 
-        const newUser = await pool.query(
-            `INSERT INTO users (username, email, password, role, is_email_verified)
-             VALUES ($1, $2, $3, $4, true)
-             RETURNING id, username, email, role, avatar_url, is_email_verified, created_at`,
-            [username, email, passwordHash, 'super_admin']
-        );
-
-        await pool.query(
-            `INSERT INTO role_audit_log (user_id, changed_by, old_role, new_role)
-             VALUES ($1, $2, $3, $4)`,
-            [newUser.rows[0].id, req.user.id, null, 'super_admin']
-        );
+        const newUser = await prisma.user.create({
+            data: {
+                username,
+                email,
+                password: passwordHash,
+                role: 'super_admin',
+                is_email_verified: true,
+                roleAuditLogs: {
+                    create: {
+                        changed_by: req.user.id,
+                        old_role: null,
+                        new_role: 'super_admin'
+                    }
+                }
+            },
+            select: publicUserSelect
+        });
 
         res.status(201).json({
             message: 'Super admin created successfully',
-            user: publicUserFields(newUser.rows[0])
+            user: publicUserFields(newUser)
         });
     } catch (error) {
         if (error instanceof z.ZodError) {
@@ -147,12 +165,12 @@ export const loginUser = async (req, res) => {
         const validatedData = loginSchema.parse(req.body);
         const { email, password } = validatedData;
 
-        const result = await pool.query(
-            'SELECT * FROM users WHERE email = $1 AND is_active = true',
-            [email]
-        );
-
-        const user = result.rows[0];
+        const user = await prisma.user.findFirst({
+            where: {
+                email,
+                is_active: true
+            }
+        });
 
         if (!user || !user.password) {
             return res.status(401).json({
@@ -168,7 +186,10 @@ export const loginUser = async (req, res) => {
             });
         }
 
-        await pool.query('UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = $1', [user.id]);
+        await prisma.user.update({
+            where: { id: user.id },
+            data: { last_login_at: new Date() }
+        });
 
         return issueAuthResponse(res, 200, 'Login successful', user);
     } catch (error) {
@@ -189,18 +210,20 @@ export const loginUser = async (req, res) => {
 export const forgotPassword = async (req, res) => {
     try {
         const { email } = forgotPasswordSchema.parse(req.body);
-        const user = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
+        const user = await prisma.user.findUnique({
+            where: { email },
+            select: { id: true }
+        });
 
-        if (user.rows.length > 0) {
+        if (user) {
             const resetToken = createSecureToken();
-            await pool.query(
-                `UPDATE users
-                 SET reset_password_token = $1,
-                     reset_password_expires = $2,
-                     updated_at = CURRENT_TIMESTAMP
-                 WHERE email = $3`,
-                [hashToken(resetToken), getExpiryDate(15), email]
-            );
+            await prisma.user.update({
+                where: { email },
+                data: {
+                    reset_password_token: hashToken(resetToken),
+                    reset_password_expires: getExpiryDate(15)
+                }
+            });
 
             await sendPasswordResetEmail(email, buildUrl('/reset-password', resetToken));
         }
@@ -226,26 +249,28 @@ export const resetPassword = async (req, res) => {
         const { token, password } = resetPasswordSchema.parse(req.body);
         const tokenHash = hashToken(token);
 
-        const user = await pool.query(
-            `SELECT id FROM users
-             WHERE reset_password_token = $1
-               AND reset_password_expires > CURRENT_TIMESTAMP`,
-            [tokenHash]
-        );
+        const user = await prisma.user.findFirst({
+            where: {
+                reset_password_token: tokenHash,
+                reset_password_expires: {
+                    gt: new Date()
+                }
+            },
+            select: { id: true }
+        });
 
-        if (user.rows.length === 0) {
+        if (!user) {
             return res.status(400).json({ message: 'Invalid or expired reset token' });
         }
 
-        await pool.query(
-            `UPDATE users
-             SET password = $1,
-                 reset_password_token = NULL,
-                 reset_password_expires = NULL,
-                 updated_at = CURRENT_TIMESTAMP
-             WHERE id = $2`,
-            [await hashPassword(password), user.rows[0].id]
-        );
+        await prisma.user.update({
+            where: { id: user.id },
+            data: {
+                password: await hashPassword(password),
+                reset_password_token: null,
+                reset_password_expires: null
+            }
+        });
 
         res.status(200).json({ message: 'Password reset successfully' });
     } catch (error) {
@@ -269,25 +294,33 @@ export const verifyEmail = async (req, res) => {
             return res.status(400).json({ message: 'Verification token is required' });
         }
 
-        const result = await pool.query(
-            `UPDATE users
-             SET is_email_verified = true,
-                 email_verification_token = NULL,
-                 email_verification_expires = NULL,
-                 updated_at = CURRENT_TIMESTAMP
-             WHERE email_verification_token = $1
-               AND email_verification_expires > CURRENT_TIMESTAMP
-             RETURNING id, username, email, role, avatar_url, is_email_verified, created_at`,
-            [hashToken(token)]
-        );
+        const user = await prisma.user.findFirst({
+            where: {
+                email_verification_token: hashToken(token),
+                email_verification_expires: {
+                    gt: new Date()
+                }
+            },
+            select: { id: true }
+        });
 
-        if (result.rows.length === 0) {
+        if (!user) {
             return res.status(400).json({ message: 'Invalid or expired verification token' });
         }
 
+        const result = await prisma.user.update({
+            where: { id: user.id },
+            data: {
+                is_email_verified: true,
+                email_verification_token: null,
+                email_verification_expires: null
+            },
+            select: publicUserSelect
+        });
+
         res.status(200).json({
             message: 'Email verified successfully',
-            user: publicUserFields(result.rows[0])
+            user: publicUserFields(result)
         });
     } catch (error) {
         console.error('Email verification error:', error.message);

@@ -1,0 +1,52 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                           Int            @id @default(autoincrement())
+  username                     String         @db.VarChar(50)
+  email                        String         @unique @db.VarChar(255)
+  password                     String?        @db.Text
+  role                         String         @default("user") @db.VarChar(20)
+  avatar_url                   String?        @db.Text
+  auth_provider                String?        @default("local") @db.VarChar(30)
+  provider_id                  String?        @db.VarChar(255)
+  is_email_verified            Boolean        @default(false)
+  email_verification_token     String?        @db.Text
+  email_verification_expires   DateTime?      @db.Timestamptz(6)
+  reset_password_token         String?        @db.Text
+  reset_password_expires       DateTime?      @db.Timestamptz(6)
+  is_active                    Boolean        @default(true)
+  last_login_at                DateTime?      @db.Timestamptz(6)
+  created_at                   DateTime       @default(now()) @db.Timestamptz(6)
+  updated_at                   DateTime       @default(now()) @updatedAt @db.Timestamptz(6)
+  roleAuditLogs                RoleAuditLog[] @relation("RoleAuditUser")
+  changedRoleAuditLogs         RoleAuditLog[] @relation("RoleAuditChangedBy")
+
+  @@unique([auth_provider, provider_id])
+  @@index([email], map: "idx_users_email")
+  @@index([role], map: "idx_users_role")
+  @@index([reset_password_token], map: "idx_users_reset_password_token")
+  @@index([email_verification_token], map: "idx_users_email_verification_token")
+  @@map("users")
+}
+
+model RoleAuditLog {
+  id         Int      @id @default(autoincrement())
+  user_id    Int?
+  changed_by Int?
+  old_role   String?  @db.VarChar(20)
+  new_role   String?  @db.VarChar(20)
+  changed_at DateTime @default(now()) @db.Timestamptz(6)
+  user       User?    @relation("RoleAuditUser", fields: [user_id], references: [id], onDelete: Cascade)
+  changedBy  User?    @relation("RoleAuditChangedBy", fields: [changed_by], references: [id], onDelete: SetNull)
+
+  @@index([user_id], map: "idx_role_audit_log_user_id")
+  @@index([changed_by], map: "idx_role_audit_log_changed_by")
+  @@map("role_audit_log")
+}

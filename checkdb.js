@@ -1,5 +1,5 @@
 // test-insert.js
-import { pool } from './src/config/db.js';
+import { prisma } from './src/config/db.js';
 import { hashPassword } from './src/utils/hash.js';
 
 async function testInsert() {
@@ -7,8 +7,8 @@ async function testInsert() {
         console.log('🔍 Starting direct insert test...\n');
         
         // Test 1: Check connection
-        const dbCheck = await pool.query('SELECT current_database()');
-        console.log('✅ Connected to database:', dbCheck.rows[0].current_database);
+        const dbCheck = await prisma.$queryRaw`SELECT current_database()`;
+        console.log('✅ Connected to database:', dbCheck[0].current_database);
         
         // Test 2: Create test user
         const testEmail = `test_${Date.now()}@example.com`;
@@ -27,19 +27,27 @@ async function testInsert() {
         
         // Insert user
         console.log('\n💾 Inserting user...');
-        const result = await pool.query(
-            'INSERT INTO users (username, email, password) VALUES ($1, $2, $3) RETURNING id, username, email',
-            [testUsername, testEmail, hashedPassword]
-        );
+        const result = await prisma.user.create({
+            data: {
+                username: testUsername,
+                email: testEmail,
+                password: hashedPassword
+            },
+            select: {
+                id: true,
+                username: true,
+                email: true
+            }
+        });
         
         console.log('✅ User inserted successfully!');
-        console.log('   User ID:', result.rows[0].id);
-        console.log('   Username:', result.rows[0].username);
-        console.log('   Email:', result.rows[0].email);
+        console.log('   User ID:', result.id);
+        console.log('   Username:', result.username);
+        console.log('   Email:', result.email);
         
         // Clean up
         console.log('\n🗑️  Cleaning up...');
-        await pool.query('DELETE FROM users WHERE id = $1', [result.rows[0].id]);
+        await prisma.user.delete({ where: { id: result.id } });
         console.log('✅ Test user deleted');
         
         console.log('\n🎉 All tests passed!');
@@ -49,7 +57,7 @@ async function testInsert() {
         console.error('Error code:', error.code);
         console.error('Error detail:', error.detail);
     } finally {
-        pool.end();
+        await prisma.$disconnect();
     }
 }
 

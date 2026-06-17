@@ -1,7 +1,6 @@
-import { pool } from '../src/config/db.js';
+import { prisma } from '../src/config/db.js';
 import { hashPassword } from '../src/utils/hash.js';
 import readline from 'readline';
-import crypto from 'crypto';
 
 const rl = readline.createInterface({
     input: process.stdin,
@@ -34,12 +33,11 @@ async function createSuperAdmin() {
     
     try {
         // Check if any super admin exists
-        const existingSuperAdmin = await pool.query(
-            'SELECT id FROM users WHERE role = $1',
-            ['super_admin']
-        );
+        const existingSuperAdminCount = await prisma.user.count({
+            where: { role: 'super_admin' }
+        });
         
-        const isFirstSuperAdmin = existingSuperAdmin.rows.length === 0;
+        const isFirstSuperAdmin = existingSuperAdminCount === 0;
         
         if (!isFirstSuperAdmin) {
             console.log('\n⚠️  A super admin already exists!');
@@ -53,63 +51,77 @@ async function createSuperAdmin() {
         }
         
         // Check if user already exists
-        const existingUser = await pool.query(
-            'SELECT id, role FROM users WHERE email = $1',
-            [email]
-        );
+        const existingUser = await prisma.user.findUnique({
+            where: { email },
+            select: { id: true, role: true }
+        });
         
         let result;
         
-        if (existingUser.rows.length > 0) {
+        if (existingUser) {
             // Upgrade existing user to super admin
-            if (isFirstSuperAdmin || existingUser.rows[0].role === 'super_admin') {
-                console.log(`\n⚠️  User ${email} is already ${existingUser.rows[0].role}`);
+            if (isFirstSuperAdmin || existingUser.role === 'super_admin') {
+                console.log(`\n⚠️  User ${email} is already ${existingUser.role}`);
                 rl.close();
                 return;
             }
             
-            const oldRole = existingUser.rows[0].role;
-            result = await pool.query(
-                `UPDATE users 
-                 SET role = $1, updated_at = CURRENT_TIMESTAMP 
-                 WHERE email = $2 
-                 RETURNING id, username, email, role`,
-                ['super_admin', email]
-            );
+            const oldRole = existingUser.role;
+            result = await prisma.user.update({
+                where: { email },
+                data: { role: 'super_admin' },
+                select: {
+                    id: true,
+                    username: true,
+                    email: true,
+                    role: true
+                }
+            });
             
             console.log(`\n✅ User ${email} upgraded from ${oldRole} to super_admin!`);
         } else {
             // Create new super admin
             const hashedPassword = await hashPassword(password);
-            result = await pool.query(
-                `INSERT INTO users (username, email, password, role) 
-                 VALUES ($1, $2, $3, $4) 
-                 RETURNING id, username, email, role`,
-                [username, email, hashedPassword, 'super_admin']
-            );
+            result = await prisma.user.create({
+                data: {
+                    username,
+                    email,
+                    password: hashedPassword,
+                    role: 'super_admin'
+                },
+                select: {
+                    id: true,
+                    username: true,
+                    email: true,
+                    role: true
+                }
+            });
             
             console.log(`\n✅ Super admin ${username} created successfully!`);
         }
         
         // Log the creation
-        await pool.query(
-            `INSERT INTO role_audit_log (user_id, changed_by, old_role, new_role)
-             VALUES ($1, $1, $2, $3)`,
-            [result.rows[0].id, null, 'super_admin']
-        );
+        await prisma.roleAuditLog.create({
+            data: {
+                user_id: result.id,
+                changed_by: result.id,
+                old_role: null,
+                new_role: 'super_admin'
+            }
+        });
         
         console.log('\n========================================');
         console.log('Super Admin Details:');
-        console.log(`ID: ${result.rows[0].id}`);
-        console.log(`Username: ${result.rows[0].username}`);
-        console.log(`Email: ${result.rows[0].email}`);
-        console.log(`Role: ${result.rows[0].role}`);
+        console.log(`ID: ${result.id}`);
+        console.log(`Username: ${result.username}`);
+        console.log(`Email: ${result.email}`);
+        console.log(`Role: ${result.role}`);
         console.log('========================================\n');
         
     } catch (error) {
         console.error('\n❌ Error:', error.message);
     } finally {
-        pool.end();
+        await prisma.$disconnect();
         rl.close();
     }
 }

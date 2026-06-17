@@ -19,7 +19,7 @@ import {
     getRoleStatistics
 } from '../controllers/admin.controller.js';
 
-import { authenticate } from '../middleware/auth.middleware.js';
+import { authenticate } from '../middlewares/auth.middleware.js';
 import { 
     isSuperAdmin, 
     isModeratorOrHigher
@@ -57,6 +57,13 @@ router.get(
     passport.authenticate('google', { session: false, failureRedirect: '/api/auth/oauth/failure' }),
     handleOAuthCallback
 );
+router.get('/oauth-urls', (req, res) => {
+    res.json({
+        google: `${process.env.API_URL || 'http://localhost:3000'}/api/auth/google`,
+        github: `${process.env.API_URL || 'http://localhost:3000'}/api/auth/github`
+    });
+});
+
 
 router.get('/github', authRateLimiter, requireOAuthConfig('github'), passport.authenticate('github', { scope: ['user:email'] }));
 router.get(

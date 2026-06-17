@@ -1,4 +1,37 @@
-import { pool } from '../config/db.js';
+import { prisma } from '../config/db.js';
+
+const validRoles = ['user', 'moderator', 'super_admin'];
+const roleRank = {
+    super_admin: 1,
+    moderator: 2,
+    user: 3
+};
+
+const roleSort = (a, b) => {
+    const rankDifference = (roleRank[a.role] || 99) - (roleRank[b.role] || 99);
+    return rankDifference || a.id - b.id;
+};
+
+const superAdminUserSelect = {
+    id: true,
+    username: true,
+    email: true,
+    role: true,
+    avatar_url: true,
+    is_active: true,
+    created_at: true,
+    updated_at: true,
+    last_login_at: true
+};
+
+const moderatorUserSelect = {
+    id: true,
+    username: true,
+    email: true,
+    role: true,
+    avatar_url: true,
+    created_at: true
+};
 
 // Get all users (with role-based filtering)
 export const getAllUsers = async (req, res) => {
@@ -7,59 +40,29 @@ export const getAllUsers = async (req, res) => {
         const limit = parseInt(req.query.limit) || 20;
         const offset = (page - 1) * limit;
         const currentUserRole = req.user.role;
-        
-        let query;
-        let params = [limit, offset];
-        
-        // Different access levels see different data
-        if (currentUserRole === 'super_admin') {
-            // Super admin sees everything including sensitive data
-            query = `
-                SELECT id, username, email, role, avatar_url, 
-                       is_active, created_at, updated_at, last_login_at
-                FROM users 
-                ORDER BY 
-                    CASE role 
-                        WHEN 'super_admin' THEN 1 
-                        WHEN 'moderator' THEN 2 
-                        WHEN 'user' THEN 3 
-                    END,
-                    id
-                LIMIT $1 OFFSET $2
-            `;
-        } else if (currentUserRole === 'moderator') {
-            // Moderator sees all users but not super admin details
-            query = `
-                SELECT id, username, email, role, avatar_url, created_at
-                FROM users 
-                WHERE role != 'super_admin'
-                ORDER BY id
-                LIMIT $1 OFFSET $2
-            `;
-        } else {
-            return res.status(403).json({ 
-                message: 'Access denied. Insufficient permissions.' 
+
+        if (!['super_admin', 'moderator'].includes(currentUserRole)) {
+            return res.status(403).json({
+                message: 'Access denied. Insufficient permissions.'
             });
         }
-        
-        const result = await pool.query(query, params);
-        
-        // Get total count based on role
-        let countQuery;
-        if (currentUserRole === 'super_admin') {
-            countQuery = 'SELECT COUNT(*) FROM users';
-        } else {
-            countQuery = 'SELECT COUNT(*) FROM users WHERE role != $1';
-            params = ['super_admin'];
-        }
-        
-        const countResult = await pool.query(countQuery, 
-            currentUserRole === 'super_admin' ? [] : ['super_admin']
-        );
-        const total = parseInt(countResult.rows[0].count);
-        
+
+        const where = currentUserRole === 'super_admin'
+            ? {}
+            : { role: { not: 'super_admin' } };
+
+        const [allUsers, total] = await Promise.all([
+            prisma.user.findMany({
+                where,
+                select: currentUserRole === 'super_admin' ? superAdminUserSelect : moderatorUserSelect
+            }),
+            prisma.user.count({ where })
+        ]);
+
+        const users = allUsers.sort(roleSort).slice(offset, offset + limit);
+
         res.status(200).json({
-            users: result.rows,
+            users,
             pagination: {
                 page,
                 limit,
@@ -68,7 +71,6 @@ export const getAllUsers = async (req, res) => {
             },
             userRole: currentUserRole
         });
-        
     } catch (error) {
         console.error('Get all users error:', error.message);
         res.status(500).json({ message: 'Internal server error' });
@@ -81,84 +83,80 @@ export const updateUserRole = async (req, res) => {
         const userId = parseInt(req.params.id);
         const { role } = req.body;
         const currentUser = req.user;
-        
+
         if (isNaN(userId)) {
             return res.status(400).json({ message: 'Invalid user ID' });
         }
-        
-        const validRoles = ['user', 'moderator', 'super_admin'];
+
         if (!validRoles.includes(role)) {
-            return res.status(400).json({ 
-                message: `Invalid role. Must be one of: ${validRoles.join(', ')}` 
+            return res.status(400).json({
+                message: `Invalid role. Must be one of: ${validRoles.join(', ')}`
             });
         }
-        
-        // Get target user
-        const targetUser = await pool.query(
-            'SELECT id, username, email, role FROM users WHERE id = $1',
-            [userId]
-        );
-        
-        if (targetUser.rows.length === 0) {
+
+        const targetUser = await prisma.user.findUnique({
+            where: { id: userId },
+            select: { id: true, username: true, email: true, role: true }
+        });
+
+        if (!targetUser) {
             return res.status(404).json({ message: 'User not found' });
         }
-        
-        const targetRole = targetUser.rows[0].role;
-        
-        // Permission checks
+
+        const targetRole = targetUser.role;
+
         if (currentUser.role !== 'super_admin') {
-            return res.status(403).json({ 
-                message: 'Only super admin can change roles' 
+            return res.status(403).json({
+                message: 'Only super admin can change roles'
             });
         }
-        
-        // Prevent changing own role (to avoid locking out super admin)
+
         if (userId === currentUser.id) {
-            return res.status(403).json({ 
-                message: 'You cannot change your own role' 
+            return res.status(403).json({
+                message: 'You cannot change your own role'
             });
         }
-        
-        // Cannot demote the only super admin
+
         if (targetRole === 'super_admin' && role !== 'super_admin') {
-            const superAdminCount = await pool.query(
-                'SELECT COUNT(*) FROM users WHERE role = $1',
-                ['super_admin']
-            );
-            
-            if (parseInt(superAdminCount.rows[0].count) <= 1) {
-                return res.status(400).json({ 
-                    message: 'Cannot demote the only super admin' 
+            const superAdminCount = await prisma.user.count({
+                where: { role: 'super_admin' }
+            });
+
+            if (superAdminCount <= 1) {
+                return res.status(400).json({
+                    message: 'Cannot demote the only super admin'
                 });
             }
         }
-        
-        // Update role
-        const result = await pool.query(
-            `UPDATE users 
-             SET role = $1, updated_at = CURRENT_TIMESTAMP 
-             WHERE id = $2 
-             RETURNING id, username, email, role`,
-            [role, userId]
-        );
-        
-        // Log the role change
-        await pool.query(
-            `INSERT INTO role_audit_log (user_id, changed_by, old_role, new_role)
-             VALUES ($1, $2, $3, $4)`,
-            [userId, currentUser.id, targetRole, role]
-        );
-        
+
+        const result = await prisma.$transaction(async (tx) => {
+            const updatedUser = await tx.user.update({
+                where: { id: userId },
+                data: { role },
+                select: { id: true, username: true, email: true, role: true }
+            });
+
+            await tx.roleAuditLog.create({
+                data: {
+                    user_id: userId,
+                    changed_by: currentUser.id,
+                    old_role: targetRole,
+                    new_role: role
+                }
+            });
+
+            return updatedUser;
+        });
+
         res.status(200).json({
             message: `User role updated from ${targetRole} to ${role}`,
-            user: result.rows[0],
+            user: result,
             changedBy: {
                 id: currentUser.id,
                 username: currentUser.username,
                 role: currentUser.role
             }
         });
-        
     } catch (error) {
         console.error('Update user role error:', error.message);
         res.status(500).json({ message: 'Internal server error' });
@@ -170,69 +168,68 @@ export const deleteUser = async (req, res) => {
     try {
         const userId = parseInt(req.params.id);
         const currentUser = req.user;
-        
+
         if (isNaN(userId)) {
             return res.status(400).json({ message: 'Invalid user ID' });
         }
-        
-        // Super admin check
+
         if (currentUser.role !== 'super_admin') {
-            return res.status(403).json({ 
-                message: 'Only super admin can delete users' 
+            return res.status(403).json({
+                message: 'Only super admin can delete users'
             });
         }
-        
-        // Cannot delete self
+
         if (userId === currentUser.id) {
-            return res.status(403).json({ 
-                message: 'You cannot delete your own account' 
+            return res.status(403).json({
+                message: 'You cannot delete your own account'
             });
         }
-        
-        // Get user info before deleting for logging
-        const targetUser = await pool.query(
-            'SELECT id, username, email, role FROM users WHERE id = $1',
-            [userId]
-        );
-        
-        if (targetUser.rows.length === 0) {
+
+        const targetUser = await prisma.user.findUnique({
+            where: { id: userId },
+            select: { id: true, username: true, email: true, role: true }
+        });
+
+        if (!targetUser) {
             return res.status(404).json({ message: 'User not found' });
         }
-        
-        // Prevent deleting the only super admin
-        if (targetUser.rows[0].role === 'super_admin') {
-            const superAdminCount = await pool.query(
-                'SELECT COUNT(*) FROM users WHERE role = $1',
-                ['super_admin']
-            );
-            
-            if (parseInt(superAdminCount.rows[0].count) <= 1) {
-                return res.status(400).json({ 
-                    message: 'Cannot delete the only super admin' 
+
+        if (targetUser.role === 'super_admin') {
+            const superAdminCount = await prisma.user.count({
+                where: { role: 'super_admin' }
+            });
+
+            if (superAdminCount <= 1) {
+                return res.status(400).json({
+                    message: 'Cannot delete the only super admin'
                 });
             }
         }
-        
-        // Log deletion
-        await pool.query(
-            `INSERT INTO role_audit_log (user_id, changed_by, old_role, new_role)
-             VALUES ($1, $2, $3, $4)`,
-            [userId, currentUser.id, targetUser.rows[0].role, 'DELETED']
-        );
-        
-        // Delete user
-        await pool.query('DELETE FROM users WHERE id = $1', [userId]);
-        
+
+        await prisma.$transaction(async (tx) => {
+            await tx.roleAuditLog.create({
+                data: {
+                    user_id: userId,
+                    changed_by: currentUser.id,
+                    old_role: targetUser.role,
+                    new_role: 'DELETED'
+                }
+            });
+
+            await tx.user.delete({
+                where: { id: userId }
+            });
+        });
+
         res.status(200).json({
             message: 'User deleted successfully',
-            deletedUser: targetUser.rows[0],
+            deletedUser: targetUser,
             deletedBy: {
                 id: currentUser.id,
                 username: currentUser.username,
                 role: currentUser.role
             }
         });
-        
     } catch (error) {
         console.error('Delete user error:', error.message);
         res.status(500).json({ message: 'Internal server error' });
@@ -244,61 +241,52 @@ export const getUsersByRole = async (req, res) => {
     try {
         const { role } = req.params;
         const currentUserRole = req.user.role;
-        
-        const validRoles = ['user', 'moderator', 'super_admin'];
+
         if (!validRoles.includes(role)) {
-            return res.status(400).json({ 
-                message: `Invalid role. Must be one of: ${validRoles.join(', ')}` 
+            return res.status(400).json({
+                message: `Invalid role. Must be one of: ${validRoles.join(', ')}`
             });
         }
-        
-        // Permission checks
+
         if (currentUserRole === 'user') {
-            return res.status(403).json({ 
-                message: 'Access denied' 
+            return res.status(403).json({
+                message: 'Access denied'
             });
         }
-        
+
         if (currentUserRole === 'moderator' && role === 'super_admin') {
-            return res.status(403).json({ 
-                message: 'Moderators cannot view super admin list' 
+            return res.status(403).json({
+                message: 'Moderators cannot view super admin list'
             });
         }
-        
-        let query;
-        let params = [role];
-        
-        if (currentUserRole === 'moderator' && role === 'moderator') {
-            // Moderators can see other moderators
-            query = `
-                SELECT id, username, email, role, created_at
-                FROM users 
-                WHERE role = $1 AND id != $2
-                ORDER BY id
-            `;
-            params = [role, req.user.id];
-        } else {
-            query = `
-                SELECT id, username, email, role, created_at
-                FROM users 
-                WHERE role = $1
-                ORDER BY id
-            `;
-        }
-        
-        const result = await pool.query(query, params);
-        
+
+        const users = await prisma.user.findMany({
+            where: {
+                role,
+                ...(currentUserRole === 'moderator' && role === 'moderator'
+                    ? { id: { not: req.user.id } }
+                    : {})
+            },
+            select: {
+                id: true,
+                username: true,
+                email: true,
+                role: true,
+                created_at: true
+            },
+            orderBy: { id: 'asc' }
+        });
+
         res.status(200).json({
-            role: role,
-            count: result.rows.length,
-            users: result.rows,
+            role,
+            count: users.length,
+            users,
             accessedBy: {
                 id: req.user.id,
                 username: req.user.username,
                 role: currentUserRole
             }
         });
-        
     } catch (error) {
         console.error('Get users by role error:', error.message);
         res.status(500).json({ message: 'Internal server error' });
@@ -309,30 +297,36 @@ export const getUsersByRole = async (req, res) => {
 export const getRoleAuditLog = async (req, res) => {
     try {
         if (req.user.role !== 'super_admin') {
-            return res.status(403).json({ 
-                message: 'Only super admin can view audit logs' 
+            return res.status(403).json({
+                message: 'Only super admin can view audit logs'
             });
         }
-        
-        const result = await pool.query(`
-            SELECT 
-                ral.*,
-                u1.username as user_username,
-                u1.email as user_email,
-                u2.username as changed_by_username,
-                u2.email as changed_by_email
-            FROM role_audit_log ral
-            JOIN users u1 ON ral.user_id = u1.id
-            JOIN users u2 ON ral.changed_by = u2.id
-            ORDER BY ral.changed_at DESC
-            LIMIT 100
-        `);
-        
-        res.status(200).json({
-            auditLog: result.rows,
-            count: result.rows.length
+
+        const auditLog = await prisma.roleAuditLog.findMany({
+            include: {
+                user: {
+                    select: { username: true, email: true }
+                },
+                changedBy: {
+                    select: { username: true, email: true }
+                }
+            },
+            orderBy: { changed_at: 'desc' },
+            take: 100
         });
-        
+
+        const rows = auditLog.map(({ user, changedBy, ...entry }) => ({
+            ...entry,
+            user_username: user?.username || null,
+            user_email: user?.email || null,
+            changed_by_username: changedBy?.username || null,
+            changed_by_email: changedBy?.email || null
+        }));
+
+        res.status(200).json({
+            auditLog: rows,
+            count: rows.length
+        });
     } catch (error) {
         console.error('Get audit log error:', error.message);
         res.status(500).json({ message: 'Internal server error' });
@@ -343,31 +337,29 @@ export const getRoleAuditLog = async (req, res) => {
 export const getRoleStatistics = async (req, res) => {
     try {
         if (req.user.role !== 'super_admin') {
-            return res.status(403).json({ 
-                message: 'Only super admin can view statistics' 
+            return res.status(403).json({
+                message: 'Only super admin can view statistics'
             });
         }
-        
-        const result = await pool.query(`
-            SELECT 
-                role,
-                COUNT(*) as count,
-                COUNT(*) * 100.0 / SUM(COUNT(*)) OVER() as percentage
-            FROM users
-            GROUP BY role
-            ORDER BY 
-                CASE role 
-                    WHEN 'super_admin' THEN 1 
-                    WHEN 'moderator' THEN 2 
-                    WHEN 'user' THEN 3 
-                END
-        `);
-        
-        res.status(200).json({
-            statistics: result.rows,
-            totalUsers: result.rows.reduce((sum, row) => sum + parseInt(row.count), 0)
+
+        const groupedRoles = await prisma.user.groupBy({
+            by: ['role'],
+            _count: { role: true }
         });
-        
+
+        const totalUsers = groupedRoles.reduce((sum, row) => sum + row._count.role, 0);
+        const statistics = groupedRoles
+            .map((row) => ({
+                role: row.role,
+                count: row._count.role.toString(),
+                percentage: totalUsers === 0 ? '0' : ((row._count.role * 100) / totalUsers).toString()
+            }))
+            .sort(roleSort);
+
+        res.status(200).json({
+            statistics,
+            totalUsers
+        });
     } catch (error) {
         console.error('Get role statistics error:', error.message);
         res.status(500).json({ message: 'Internal server error' });
