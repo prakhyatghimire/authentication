@@ -27,6 +27,7 @@ model User {
   updated_at                   DateTime       @default(now()) @updatedAt @db.Timestamptz(6)
   roleAuditLogs                RoleAuditLog[] @relation("RoleAuditUser")
   changedRoleAuditLogs         RoleAuditLog[] @relation("RoleAuditChangedBy")
+  createdMovies                Movie[]        @relation("MovieCreatedBy")
 
   @@unique([auth_provider, provider_id])
   @@index([email], map: "idx_users_email")
@@ -34,6 +35,73 @@ model User {
   @@index([reset_password_token], map: "idx_users_reset_password_token")
   @@index([email_verification_token], map: "idx_users_email_verification_token")
   @@map("users")
+}
+
+enum Source {
+  TMDB
+  NEPALI
+}
+
+enum CastRole {
+  DIRECTOR
+  ACTOR
+  WRITER
+}
+
+model Movie {
+  id             String      @id @default(uuid()) @db.Uuid
+  tmdbId         Int?        @unique
+  source         Source      @default(TMDB)
+  title          String
+  slug           String      @unique
+  description    String?     @db.Text
+  releaseDate    DateTime?   @db.Date
+  runtime        Int?
+  posterUrl      String?     @db.Text
+  backdropUrl    String?     @db.Text
+  language       String?
+  genres         String[]
+  status         String?
+  tmdbRating     Float?
+  tmdbVoteCount  Int?
+  createdById    Int?
+  lastSyncedAt   DateTime?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  createdBy      User?       @relation("MovieCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  cast           MovieCast[]
+
+  @@index([title])
+  @@index([source])
+  @@index([language])
+}
+
+model Person {
+  id           String      @id @default(uuid()) @db.Uuid
+  tmdbPersonId Int?        @unique
+  name         String
+  profileImage String?     @db.Text
+  biography    String?     @db.Text
+  birthday     DateTime?   @db.Date
+  createdAt    DateTime    @default(now())
+  movieCast    MovieCast[]
+
+  @@index([name])
+}
+
+model MovieCast {
+  id            String   @id @default(uuid()) @db.Uuid
+  movieId       String   @db.Uuid
+  personId      String   @db.Uuid
+  role          CastRole
+  characterName String?
+  orderIndex    Int?
+  movie         Movie    @relation(fields: [movieId], references: [id], onDelete: Cascade)
+  person        Person   @relation(fields: [personId], references: [id], onDelete: Cascade)
+
+  @@unique([movieId, personId, role])
+  @@index([movieId])
+  @@index([personId])
 }
 
 model RoleAuditLog {

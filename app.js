@@ -3,7 +3,9 @@ import cors from 'cors';
 import helmet from 'helmet';
 import session from 'express-session';
 import authRoutes from './src/routes/auth.routes.js';
+import movieRoutes from './src/modules/movies/movie.routes.js';
 import passport from './src/config/passport.js';
+import { errorHandler } from './src/middlewares/errorHandler.js';
 
 const app = express();
 
@@ -29,9 +31,12 @@ app.use(passport.initialize());
 app.use(passport.session());
 
 app.use('/api/auth', authRoutes);
+app.use('/api/movies', movieRoutes);
 
 app.get('/', (req, res) => {
     res.json({ message: 'Auth API is running' });
 });
+
+app.use(errorHandler);
 
 export default app;
