@@ -13,6 +13,15 @@ const oauthUserSelect = {
     created_at: true
 };
 
+const systemListsForUser = (userId) => ({
+    create: [
+        { userId, name: 'Watchlist', isSystem: true, systemType: 'watchlist' },
+        { userId, name: 'Liked Movies', isSystem: true, systemType: 'liked' },
+        { userId, name: 'Watched', isSystem: true, systemType: 'watched' }
+    ],
+    skipDuplicates: true
+});
+
 const upsertOAuthUser = async ({ provider, providerId, email, username, avatarUrl }) => {
     if (!email) {
         throw new Error(`${provider} account did not provide an email address`);
@@ -47,18 +56,24 @@ const upsertOAuthUser = async ({ provider, providerId, email, username, avatarUr
         return result;
     }
 
-    const result = await prisma.user.create({
-        data: {
-            username,
-            email,
-            role: 'user',
-            avatar_url: avatarUrl,
-            auth_provider: provider,
-            provider_id: providerId,
-            is_email_verified: true,
-            last_login_at: new Date()
-        },
-        select: oauthUserSelect
+    const result = await prisma.$transaction(async (tx) => {
+        const user = await tx.user.create({
+            data: {
+                username,
+                email,
+                role: 'user',
+                avatar_url: avatarUrl,
+                auth_provider: provider,
+                provider_id: providerId,
+                is_email_verified: true,
+                last_login_at: new Date()
+            },
+            select: oauthUserSelect
+        });
+
+        await tx.list.createMany(systemListsForUser(user.id));
+
+        return user;
     });
 
     return result;

@@ -38,6 +38,15 @@ const publicUserSelect = {
     created_at: true
 };
 
+const systemListsForUser = (userId) => ({
+    create: [
+        { userId, name: 'Watchlist', isSystem: true, systemType: 'watchlist' },
+        { userId, name: 'Liked Movies', isSystem: true, systemType: 'liked' },
+        { userId, name: 'Watched', isSystem: true, systemType: 'watched' }
+    ],
+    skipDuplicates: true
+});
+
 const issueAuthResponse = (res, status, message, user) => {
     const token = generateToken(user);
 
@@ -68,17 +77,23 @@ export const registerUser = async (req, res) => {
         const verificationToken = createSecureToken();
         const verificationTokenHash = hashToken(verificationToken);
 
-        const newUser = await prisma.user.create({
-            data: {
-                username,
-                email,
-                password: passwordHash,
-                role: 'user',
-                is_email_verified: false,
-                email_verification_token: verificationTokenHash,
-                email_verification_expires: getExpiryDate(24 * 60)
-            },
-            select: publicUserSelect
+        const newUser = await prisma.$transaction(async (tx) => {
+            const user = await tx.user.create({
+                data: {
+                    username,
+                    email,
+                    password: passwordHash,
+                    role: 'user',
+                    is_email_verified: false,
+                    email_verification_token: verificationTokenHash,
+                    email_verification_expires: getExpiryDate(24 * 60)
+                },
+                select: publicUserSelect
+            });
+
+            await tx.list.createMany(systemListsForUser(user.id));
+
+            return user;
         });
 
         await sendVerificationEmail(email, buildUrl('/verify-email', verificationToken));
@@ -123,22 +138,28 @@ export const registerSuperAdmin = async (req, res) => {
 
         const passwordHash = await hashPassword(password);
 
-        const newUser = await prisma.user.create({
-            data: {
-                username,
-                email,
-                password: passwordHash,
-                role: 'super_admin',
-                is_email_verified: true,
-                roleAuditLogs: {
-                    create: {
-                        changed_by: req.user.id,
-                        old_role: null,
-                        new_role: 'super_admin'
+        const newUser = await prisma.$transaction(async (tx) => {
+            const user = await tx.user.create({
+                data: {
+                    username,
+                    email,
+                    password: passwordHash,
+                    role: 'super_admin',
+                    is_email_verified: true,
+                    roleAuditLogs: {
+                        create: {
+                            changed_by: req.user.id,
+                            old_role: null,
+                            new_role: 'super_admin'
+                        }
                     }
-                }
-            },
-            select: publicUserSelect
+                },
+                select: publicUserSelect
+            });
+
+            await tx.list.createMany(systemListsForUser(user.id));
+
+            return user;
         });
 
         res.status(201).json({

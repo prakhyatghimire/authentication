@@ -8,6 +8,8 @@ import {
     mapTmdbPersonToPrisma
 } from '../../utils/tmdbMapper.js';
 import { getPagination } from '../../utils/pagination.js';
+import { cloudinary } from '../../config/cloudinary.js';
+import { getRecommendations } from '../../utils/recommendationClient.js';
 
 const movieInclude = {
     cast: {
@@ -279,3 +281,326 @@ export const getMovieById = async (id) => {
 
     return movie;
 };
+
+const parseOptionalDate = (value) => {
+    if (!value) {
+        return undefined;
+    }
+
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? undefined : date;
+};
+
+const parseGenres = (genres) => {
+    if (Array.isArray(genres)) {
+        return genres.map((genre) => String(genre).trim()).filter(Boolean);
+    }
+
+    if (typeof genres === 'string') {
+        return genres.split(',').map((genre) => genre.trim()).filter(Boolean);
+    }
+
+    return [];
+};
+
+const parseAwards = (awards) => {
+    if (!awards) {
+        return undefined;
+    }
+
+    if (typeof awards !== 'string') {
+        return awards;
+    }
+
+    try {
+        return JSON.parse(awards);
+    } catch (error) {
+        throw new ApiError(400, 'Awards must be valid JSON');
+    }
+};
+
+const parseBigInt = (value) => {
+    if (value === undefined || value === null || value === '') {
+        return undefined;
+    }
+
+    try {
+        return BigInt(value);
+    } catch (error) {
+        throw new ApiError(400, 'boxOfficeNpr must be a valid number');
+    }
+};
+
+const serializeMovie = (movie) => {
+    if (!movie?.nepaliDetail?.boxOfficeNpr) {
+        return movie;
+    }
+
+    return {
+        ...movie,
+        nepaliDetail: {
+            ...movie.nepaliDetail,
+            boxOfficeNpr: movie.nepaliDetail.boxOfficeNpr.toString()
+        }
+    };
+};
+
+const getCloudinaryPublicId = (url) => {
+    if (!url) {
+        return null;
+    }
+
+    const match = url.match(/\/upload\/(?:v\d+\/)?(.+)\.[a-zA-Z0-9]+$/);
+    return match?.[1] || null;
+};
+
+export const createNepaliMovie = async ({ body, file, userId }) => {
+    const title = body.title?.trim();
+
+    if (!title) {
+        throw new ApiError(400, 'Title is required');
+    }
+
+    const releaseDate = parseOptionalDate(body.releaseDate) || null;
+    const slug = await createUniqueSlug({ title, releaseDate });
+    const genres = parseGenres(body.genres);
+
+    const movie = await prisma.$transaction(async (tx) => {
+        const createdMovie = await tx.movie.create({
+            data: {
+                source: 'NEPALI',
+                title,
+                slug,
+                description: body.description || null,
+                releaseDate,
+                runtime: body.runtime ? parseInt(body.runtime) : null,
+                posterUrl: file?.path || null,
+                language: body.language || 'ne',
+                genres,
+                status: body.status || null,
+                createdById: userId
+            }
+        });
+
+        await tx.nepaliMovieDetail.create({
+            data: {
+                movieId: createdMovie.id,
+                productionHouse: body.productionHouse || null,
+                distributor: body.distributor || null,
+                boxOfficeNpr: parseBigInt(body.boxOfficeNpr),
+                awards: parseAwards(body.awards),
+                extraNotes: body.extraNotes || null
+            }
+        });
+
+        return tx.movie.findUnique({
+            where: { id: createdMovie.id },
+            include: { nepaliDetail: true, cast: { include: { person: true } } }
+        });
+    });
+
+    return serializeMovie(movie);
+};
+
+export const updateNepaliMovie = async ({ id, body, file }) => {
+    const existing = await prisma.movie.findUnique({
+        where: { id },
+        include: { nepaliDetail: true }
+    });
+
+    if (!existing || existing.source !== 'NEPALI') {
+        throw new ApiError(404, 'Nepali movie not found');
+    }
+
+    const releaseDate = body.releaseDate !== undefined ? parseOptionalDate(body.releaseDate) || null : existing.releaseDate;
+    const title = body.title?.trim() || existing.title;
+    const shouldRegenerateSlug = body.title !== undefined || body.releaseDate !== undefined;
+    const slug = shouldRegenerateSlug
+        ? await createUniqueSlug({ title, releaseDate, currentMovieId: existing.id })
+        : existing.slug;
+
+    const movieData = {
+        ...(body.title !== undefined ? { title } : {}),
+        ...(body.description !== undefined ? { description: body.description || null } : {}),
+        ...(body.releaseDate !== undefined ? { releaseDate } : {}),
+        ...(body.runtime !== undefined ? { runtime: body.runtime ? parseInt(body.runtime) : null } : {}),
+        ...(file?.path ? { posterUrl: file.path } : {}),
+        ...(body.language !== undefined ? { language: body.language || 'ne' } : {}),
+        ...(body.genres !== undefined ? { genres: parseGenres(body.genres) } : {}),
+        ...(body.status !== undefined ? { status: body.status || null } : {}),
+        slug
+    };
+
+    const detailData = {
+        ...(body.productionHouse !== undefined ? { productionHouse: body.productionHouse || null } : {}),
+        ...(body.distributor !== undefined ? { distributor: body.distributor || null } : {}),
+        ...(body.boxOfficeNpr !== undefined ? { boxOfficeNpr: parseBigInt(body.boxOfficeNpr) || null } : {}),
+        ...(body.awards !== undefined ? { awards: parseAwards(body.awards) || null } : {}),
+        ...(body.extraNotes !== undefined ? { extraNotes: body.extraNotes || null } : {})
+    };
+
+    const movie = await prisma.$transaction(async (tx) => {
+        await tx.movie.update({
+            where: { id },
+            data: movieData
+        });
+
+        await tx.nepaliMovieDetail.upsert({
+            where: { movieId: id },
+            create: { movieId: id, ...detailData },
+            update: detailData
+        });
+
+        return tx.movie.findUnique({
+            where: { id },
+            include: { nepaliDetail: true, cast: { include: { person: true } } }
+        });
+    });
+
+    return serializeMovie(movie);
+};
+
+export const deleteNepaliMovie = async (id) => {
+    const movie = await prisma.movie.findUnique({
+        where: { id },
+        select: { id: true, source: true, posterUrl: true }
+    });
+
+    if (!movie || movie.source !== 'NEPALI') {
+        throw new ApiError(404, 'Nepali movie not found');
+    }
+
+    const publicId = getCloudinaryPublicId(movie.posterUrl);
+
+    if (publicId) {
+        await cloudinary.uploader.destroy(publicId);
+    }
+
+    await prisma.movie.delete({ where: { id } });
+
+    return { message: 'Movie deleted' };
+};
+
+export const addNepaliMovieCast = async ({ movieId, body }) => {
+    const movie = await prisma.movie.findUnique({
+        where: { id: movieId },
+        select: { id: true, source: true }
+    });
+
+    if (!movie || movie.source !== 'NEPALI') {
+        throw new ApiError(404, 'Nepali movie not found');
+    }
+
+    const role = body.role;
+
+    if (!['DIRECTOR', 'ACTOR', 'WRITER'].includes(role)) {
+        throw new ApiError(400, 'Invalid cast role');
+    }
+
+    let personId = body.personId;
+
+    if (!personId) {
+        if (!body.name?.trim()) {
+            throw new ApiError(400, 'personId or name is required');
+        }
+
+        const person = await prisma.person.create({
+            data: {
+                name: body.name.trim(),
+                tmdbPersonId: null
+            }
+        });
+
+        personId = person.id;
+    } else {
+        const person = await prisma.person.findUnique({ where: { id: personId } });
+
+        if (!person) {
+            throw new ApiError(404, 'Person not found');
+        }
+    }
+
+    return prisma.movieCast.upsert({
+        where: {
+            movieId_personId_role: {
+                movieId,
+                personId,
+                role
+            }
+        },
+        create: {
+            movieId,
+            personId,
+            role,
+            characterName: body.characterName || null,
+            orderIndex: body.orderIndex !== undefined ? parseInt(body.orderIndex) : null
+        },
+        update: {
+            characterName: body.characterName || null,
+            orderIndex: body.orderIndex !== undefined ? parseInt(body.orderIndex) : null
+        },
+        include: { person: true }
+    });
+};
+
+export const removeNepaliMovieCast = async ({ movieId, castId }) => {
+    const cast = await prisma.movieCast.findFirst({
+        where: {
+            id: castId,
+            movieId,
+            movie: { source: 'NEPALI' }
+        }
+    });
+
+    if (!cast) {
+        throw new ApiError(404, 'Cast entry not found');
+    }
+
+    await prisma.movieCast.delete({ where: { id: castId } });
+};
+
+export const getRecommendedMovies = async (userId) => {
+    const engineMovieIds = await getRecommendations(userId);
+
+    if (engineMovieIds.length > 0) {
+        const movies = await prisma.movie.findMany({
+            where: { id: { in: engineMovieIds } }
+        });
+        const byId = new Map(movies.map((movie) => [movie.id, movie]));
+
+        return {
+            movies: engineMovieIds.map((id) => byId.get(id)).filter(Boolean),
+            source: 'engine'
+        };
+    }
+
+    const watchedList = await prisma.list.findFirst({
+        where: {
+            userId,
+            systemType: 'watched'
+        },
+        include: {
+            movies: {
+                select: { movieId: true }
+            }
+        }
+    });
+
+    const watchedMovieIds = watchedList?.movies.map((item) => item.movieId) || [];
+    const movies = await prisma.movie.findMany({
+        where: {
+            id: { notIn: watchedMovieIds },
+            tmdbRating: { not: null }
+        },
+        orderBy: { tmdbRating: 'desc' },
+        take: 20
+    });
+
+    return {
+        movies,
+        source: 'fallback'
+    };
+};
+
+export const refreshTmdbListMovie = upsertTmdbListMovie;
+export const refreshTmdbMovie = upsertTmdbMovie;

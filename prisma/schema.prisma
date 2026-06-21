@@ -28,6 +28,15 @@ model User {
   roleAuditLogs                RoleAuditLog[] @relation("RoleAuditUser")
   changedRoleAuditLogs         RoleAuditLog[] @relation("RoleAuditChangedBy")
   createdMovies                Movie[]        @relation("MovieCreatedBy")
+  reviews                      Review[]
+  reviewLikes                  ReviewLike[]
+  reviewComments               ReviewComment[]
+  lists                        List[]
+  following                    Follow[]       @relation("Following")
+  followers                    Follow[]       @relation("Followers")
+  activities                   ActivityFeed[] @relation("ActivityActor")
+  bio                          String?        @db.Text
+  isBanned                     Boolean        @default(false)
 
   @@unique([auth_provider, provider_id])
   @@index([email], map: "idx_users_email")
@@ -70,10 +79,25 @@ model Movie {
   updatedAt      DateTime    @updatedAt
   createdBy      User?       @relation("MovieCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
   cast           MovieCast[]
+  nepaliDetail   NepaliMovieDetail?
+  reviews        Review[]
+  listMovies     ListMovie[]
 
   @@index([title])
   @@index([source])
   @@index([language])
+}
+
+model NepaliMovieDetail {
+  id              String   @id @default(uuid()) @db.Uuid
+  movieId         String   @unique @db.Uuid
+  productionHouse String?
+  distributor     String?
+  boxOfficeNpr    BigInt?
+  awards          Json?
+  extraNotes      String?  @db.Text
+  createdAt       DateTime @default(now())
+  movie           Movie    @relation(fields: [movieId], references: [id], onDelete: Cascade)
 }
 
 model Person {
@@ -117,4 +141,112 @@ model RoleAuditLog {
   @@index([user_id], map: "idx_role_audit_log_user_id")
   @@index([changed_by], map: "idx_role_audit_log_changed_by")
   @@map("role_audit_log")
+}
+
+model Review {
+  id              String          @id @default(uuid()) @db.Uuid
+  userId          Int
+  movieId         String          @db.Uuid
+  rating          Float
+  body            String?         @db.Text
+  containsSpoiler Boolean         @default(false)
+  isDeleted       Boolean         @default(false)
+  isFlagged       Boolean         @default(false)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  movie           Movie           @relation(fields: [movieId], references: [id], onDelete: Cascade)
+  likes           ReviewLike[]
+  comments        ReviewComment[]
+
+  @@unique([userId, movieId])
+  @@index([movieId])
+  @@index([userId])
+}
+
+model ReviewLike {
+  id        String   @id @default(uuid()) @db.Uuid
+  reviewId  String   @db.Uuid
+  userId    Int
+  createdAt DateTime @default(now())
+  review    Review   @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([reviewId, userId])
+  @@index([userId])
+}
+
+model ReviewComment {
+  id              String          @id @default(uuid()) @db.Uuid
+  reviewId        String          @db.Uuid
+  userId          Int
+  body            String          @db.Text
+  parentCommentId String?         @db.Uuid
+  isDeleted       Boolean         @default(false)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  review          Review          @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  parentComment   ReviewComment?  @relation("CommentReplies", fields: [parentCommentId], references: [id], onDelete: Cascade)
+  replies         ReviewComment[] @relation("CommentReplies")
+
+  @@index([reviewId])
+  @@index([userId])
+  @@index([parentCommentId])
+}
+
+model List {
+  id          String      @id @default(uuid()) @db.Uuid
+  userId      Int
+  name        String
+  description String?     @db.Text
+  isPrivate   Boolean     @default(false)
+  isSystem    Boolean     @default(false)
+  systemType  String?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  movies      ListMovie[]
+
+  @@unique([userId, systemType])
+  @@index([userId])
+}
+
+model ListMovie {
+  id        String   @id @default(uuid()) @db.Uuid
+  listId    String   @db.Uuid
+  movieId   String   @db.Uuid
+  addedAt   DateTime @default(now())
+  sortOrder Int?
+  notes     String?  @db.Text
+  list      List     @relation(fields: [listId], references: [id], onDelete: Cascade)
+  movie     Movie    @relation(fields: [movieId], references: [id], onDelete: Cascade)
+
+  @@unique([listId, movieId])
+  @@index([movieId])
+}
+
+model Follow {
+  followerId  Int
+  followingId Int
+  createdAt   DateTime @default(now())
+  follower    User     @relation("Following", fields: [followerId], references: [id], onDelete: Cascade)
+  following   User     @relation("Followers", fields: [followingId], references: [id], onDelete: Cascade)
+
+  @@id([followerId, followingId])
+  @@index([followingId])
+}
+
+model ActivityFeed {
+  id           String   @id @default(uuid()) @db.Uuid
+  actorId      Int
+  activityType String
+  targetType   String
+  targetId     String
+  metadata     Json?
+  createdAt    DateTime @default(now())
+  actor        User     @relation("ActivityActor", fields: [actorId], references: [id], onDelete: Cascade)
+
+  @@index([actorId])
+  @@index([createdAt])
 }
